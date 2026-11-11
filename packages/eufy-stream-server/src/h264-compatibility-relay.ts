@@ -272,6 +272,14 @@ export class H264CompatibilityRelay extends EventEmitter {
           "0:v:0",
           "-map",
           "0:a?",
+          // Cap the width at 1920. Dual-lens cameras (e.g. eufyCam S4) send
+          // up to 2688x3040 (two stacked 2688x1520 views) on a strong link;
+          // single-threaded ultrafast x264 cannot encode that in real time on
+          // low-power hosts, and HomeKit then shows "No Response".
+          "-vf",
+          "scale='min(1920,iw)':-2:flags=fast_bilinear",
+          "-threads:v",
+          "2",
           "-c:v",
           "libx264",
           "-preset",

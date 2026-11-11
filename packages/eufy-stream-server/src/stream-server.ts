@@ -227,7 +227,17 @@ export class StreamServer extends EventEmitter {
    * (`startStopTimeout` below uses `COLD_START_STALE_THRESHOLD_MS`), then go
    * straight to the recycle instead of hammering 3× and burning ~90s first.
    */
-  private readonly MAX_NO_DATA_STARTS = 1;
+  private readonly MAX_NO_DATA_STARTS = 3;
+  /**
+   * Timestamp of the most recent `startLivestream` that is counted in
+   * `consecutiveNoDataStarts`. A maxed counter older than
+   * `NO_DATA_COUNTER_WINDOW_MS` is stale (the camera has had time to settle
+   * since those attempts) and is reset instead of declaring the upstream
+   * wedged on the spot — otherwise a fresh consumer minutes later inherits
+   * an instant give-up plus a station recycle it never asked for.
+   */
+  private lastNoDataStartAt = 0;
+  private readonly NO_DATA_COUNTER_WINDOW_MS = 120_000;
 
   /**
    * Timestamp of the most recent `LIVESTREAM_VIDEO_DATA` event for this
@@ -1298,10 +1308,18 @@ export class StreamServer extends EventEmitter {
           // consecutive startLivestream commands without ever receiving
           // video data, give up and signal an upstream wedge.
           if (this.consecutiveNoDataStarts >= this.MAX_NO_DATA_STARTS) {
-            this.markUpstreamWedged("cold-start-counter-maxed", {
-              attempts: this.consecutiveNoDataStarts,
-            });
-            break;
+            const sinceLastStart = Date.now() - this.lastNoDataStartAt;
+            if (sinceLastStart > this.NO_DATA_COUNTER_WINDOW_MS) {
+              this.logger.info(
+                `♻️  Resetting stale no-data counter (${this.consecutiveNoDataStarts} start(s), last ${Math.round(sinceLastStart / 1000)}s ago) — retrying before declaring the upstream wedged`,
+              );
+              this.consecutiveNoDataStarts = 0;
+            } else {
+              this.markUpstreamWedged("cold-start-counter-maxed", {
+                attempts: this.consecutiveNoDataStarts,
+              });
+              break;
+            }
           }
 
           // If a higher-priority camera on this HomeBase preempted us, stay
@@ -1315,6 +1333,7 @@ export class StreamServer extends EventEmitter {
 
           // Need to start livestream
           this.consecutiveNoDataStarts++;
+          this.lastNoDataStartAt = Date.now();
           this.livestreamSessionStartedAt = Date.now();
           this.logger.info(
             `🎥 Starting livestream (attempt ${attempt}/${maxRetries}, consecutive-no-data=${this.consecutiveNoDataStarts}/${this.MAX_NO_DATA_STARTS})`,
