@@ -292,6 +292,15 @@ export class H264CompatibilityRelay extends EventEmitter {
           "30",
           "-sc_threshold",
           "0",
+          // Bound the bitrate. Uncapped ultrafast x264 on a busy outdoor scene
+          // ran far above what an iPhone on Wi-Fi accepts; HomeKit reported
+          // thousands of lost packets and timed out with "No Response".
+          "-b:v",
+          "2500k",
+          "-maxrate",
+          "3000k",
+          "-bufsize",
+          "3000k",
           "-c:a",
           "aac",
           // Fragment each output frame and flush the AVIO layer: fMP4 output
