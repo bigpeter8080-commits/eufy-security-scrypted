@@ -245,6 +245,10 @@ export class H264CompatibilityRelay extends EventEmitter {
   }
 
   private spawnChild(generation: number): void {
+    // Timing instrumentation: "firstOutput" fires once per ffmpeg child with
+    // the milliseconds from spawn to its first encoded byte.
+    const spawnedAt = Date.now();
+    let reportedFirstOutput = false;
     let child: Child;
     try {
       child = this.createChild(
@@ -286,10 +290,12 @@ export class H264CompatibilityRelay extends EventEmitter {
           "ultrafast",
           "-tune",
           "zerolatency",
+          // Keyframe every 15 frames (1 s at 15 fps): HomeKit waits for an
+          // IDR before showing video, so this halves the average wait.
           "-g",
-          "30",
+          "15",
           "-keyint_min",
-          "30",
+          "15",
           "-sc_threshold",
           "0",
           // Bound the bitrate. Uncapped ultrafast x264 on a busy outdoor scene
@@ -352,6 +358,10 @@ export class H264CompatibilityRelay extends EventEmitter {
         this.parser === parser &&
         this.child === child
       ) {
+        if (!reportedFirstOutput) {
+          reportedFirstOutput = true;
+          this.emit("firstOutput", Date.now() - spawnedAt, Date.now());
+        }
         parser.write(chunk);
       }
     });

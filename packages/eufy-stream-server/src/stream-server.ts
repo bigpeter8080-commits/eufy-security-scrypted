@@ -886,8 +886,15 @@ export class StreamServer extends EventEmitter {
         if (!this.livestreamActualState) {
           this.setLivestreamActual(true);
           this.consecutiveNoDataStarts = 0;
+          const nowMs = Date.now();
+          const d = new Date(nowMs);
+          const hh = (n: number, w = 2) => String(n).padStart(w, "0");
+          const wall = `${hh(d.getHours())}:${hh(d.getMinutes())}:${hh(d.getSeconds())}.${hh(d.getMilliseconds(), 3)}`;
+          const sinceStart = this.livestreamSessionStartedAt
+            ? `${nowMs - this.livestreamSessionStartedAt} ms after startLivestream`
+            : "no start anchor";
           this.logger.info(
-            "📹 Livestream confirmed active - receiving video data",
+            `📹 Livestream confirmed active - receiving video data (⏱ ${wall}, first camera frame ${sinceStart})`,
           );
         }
 
