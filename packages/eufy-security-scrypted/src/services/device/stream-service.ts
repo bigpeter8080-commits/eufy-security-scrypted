@@ -190,6 +190,13 @@ function escapeStreamRequestLogField(value?: string): string {
   return (value ?? "<none>").replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 }
 
+/** Local wall-clock HH:MM:SS.mmm for timing log lines (logs carry no timestamps). */
+function clock(ms: number): string {
+  const d = new Date(ms);
+  const p = (n: number, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+
 /**
  * StreamService handles video streaming operations
  *
@@ -304,8 +311,12 @@ export class StreamService {
     quality: VideoQuality | undefined,
     options?: RequestMediaStreamOptions,
   ): Promise<MediaObject> {
+    this.lastStreamRequestAt = Date.now();
     this.logger.info(
       `[stream-request] id=${escapeStreamRequestLogField(options?.id)} destination=${escapeStreamRequestLogField(options?.destination)} tool=${escapeStreamRequestLogField(options?.tool)}`,
+    );
+    this.logger.info(
+      `⏱ ${clock(this.lastStreamRequestAt)} stream-request received`,
     );
     this.logger.info("Getting video stream, starting stream server if needed");
 
@@ -339,6 +350,9 @@ export class StreamService {
           relay.port,
           quality,
           options,
+        );
+        this.logger.info(
+          `⏱ ${clock(Date.now())} H.264 media object handed to Scrypted: +${Date.now() - this.lastStreamRequestAt} ms after stream-request`,
         );
         return media;
       }
@@ -488,6 +502,8 @@ export class StreamService {
 
   /** Last codec verified from live metadata; survives failed sessions. */
   private lastVerifiedCodec?: SourceCodec;
+  /** Timing instrumentation: wall-clock ms of the latest getVideoStream call. */
+  private lastStreamRequestAt = 0;
 
   private currentVerifiedSource(): { codec?: SourceCodec; verified: boolean } {
     if (!this.streamServer.isMetadataVerifiedForCurrentSession()) {
@@ -577,6 +593,22 @@ export class StreamService {
         ffmpegPath: await this.resolveFfmpegPath(),
         pool: encoderPool,
       });
+      // Timing instrumentation (see stream-request "⏱" lines).
+      (
+        this.relay as unknown as {
+          on?: (
+            event: "firstOutput",
+            listener: (spawnMs: number, at: number) => void,
+          ) => void;
+        }
+      ).on?.("firstOutput", (spawnMs: number, at: number) => {
+        const sinceRequest = this.lastStreamRequestAt
+          ? ` / +${at - this.lastStreamRequestAt} ms after stream-request`
+          : "";
+        this.logger.info(
+          `⏱ ${clock(at)} H.264 relay first output: ${spawnMs} ms after encoder start${sinceRequest}`,
+        );
+      });
     }
     // A shared relay with a listening port is already serving its camera.
     // A failed request may not tear it down: other consumers use the same
@@ -640,10 +672,12 @@ export class StreamService {
       "error",
       "-fflags",
       "+genpts+nobuffer",
+      // The relay's fMP4 init segment already declares H.264 (+AAC); a short
+      // probe is enough and cuts up to ~1.5 s from live-view startup.
       "-analyzeduration",
-      "2000000",
+      "500000",
       "-probesize",
-      "1000000",
+      "131072",
       "-f",
       "mp4",
       "-i",
