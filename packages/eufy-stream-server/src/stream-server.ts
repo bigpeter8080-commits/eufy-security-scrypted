@@ -1138,6 +1138,43 @@ export class StreamServer extends EventEmitter {
           : "Upstream livestream stopped delivering data mid-session",
       ),
     );
+
+    this.scheduleWedgeRetry();
+  }
+
+  /**
+   * A wedge only re-arms when a *fresh* consumer attaches. A camera with a
+   * continuous prebuffer never gets one — the prebuffer stays attached — so
+   * after a camera reboot (firmware update, SD-card format, power blip) its
+   * stream stayed down until the plugin was restarted. Retry periodically
+   * while real consumers remain attached.
+   */
+  private wedgeRetryTimer?: ReturnType<typeof setTimeout>;
+  private readonly WEDGE_RETRY_MS = 60_000;
+
+  private scheduleWedgeRetry(): void {
+    if (this.wedgeRetryTimer) clearTimeout(this.wedgeRetryTimer);
+    this.wedgeRetryTimer = setTimeout(() => {
+      this.wedgeRetryTimer = undefined;
+      if (!this.isActive || this.livestreamIntendedState) return;
+      if (this.getRealConsumerCount() <= 0) return;
+      if (this.recycleInFlight || this.slotRevoked) {
+        // Recycle completion re-arms consumers itself; a revoked slot waits
+        // for its owner. Check again later.
+        this.scheduleWedgeRetry();
+        return;
+      }
+      this.logger.info(
+        `🔁 Retrying livestream ${this.WEDGE_RETRY_MS / 1000}s after upstream wedge (${this.getRealConsumerCount()} consumer(s) still attached)`,
+      );
+      this.consecutiveNoDataStarts = 0;
+      this.livestreamIntendedState = true;
+      this.lastClientActivity = Date.now();
+      this.startActivityMonitoring();
+      this.ensureLivestreamState().catch((e) =>
+        this.logger.warn(`Wedge retry ensureLivestreamState failed: ${e}`),
+      );
+    }, this.WEDGE_RETRY_MS);
   }
 
   /** Release our HomeBase stream-slot lease, if held. Idempotent. */
@@ -1865,6 +1902,10 @@ export class StreamServer extends EventEmitter {
     if (this.startStopTimeout) {
       clearTimeout(this.startStopTimeout);
       this.startStopTimeout = undefined;
+    }
+    if (this.wedgeRetryTimer) {
+      clearTimeout(this.wedgeRetryTimer);
+      this.wedgeRetryTimer = undefined;
     }
     this.cancelPostSnapshotLinger("server stopping");
     if (this.warmLease) {
