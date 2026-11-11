@@ -268,7 +268,15 @@ export class StreamService {
       ...(audio && { audio }),
     };
 
-    if (source.codec !== "H265") return [native];
+    // Keep offering the compatibility stream once the source has ever been
+    // verified as H.265, or whenever the user forces compatibility mode.
+    // Dropping it while the codec is momentarily unverified (e.g. after a
+    // failed cold start) makes the rebroadcast plugin tear the "p2p-h264"
+    // session down, and the next HomeKit request then lands on raw H.265.
+    const effectiveCodec = source.codec ?? this.lastVerifiedCodec;
+    if (effectiveCodec !== "H265" && this.compatibilityMode() !== "Force") {
+      return [native];
+    }
 
     return [
       native,
@@ -478,6 +486,9 @@ export class StreamService {
     return await sdk.mediaManager.createFFmpegMediaObject(ffmpegInput);
   }
 
+  /** Last codec verified from live metadata; survives failed sessions. */
+  private lastVerifiedCodec?: SourceCodec;
+
   private currentVerifiedSource(): { codec?: SourceCodec; verified: boolean } {
     if (!this.streamServer.isMetadataVerifiedForCurrentSession()) {
       return { verified: false };
@@ -485,6 +496,7 @@ export class StreamService {
     const codec = this.toSourceCodec(
       this.streamServer.getVideoMetadata()?.videoCodec,
     );
+    if (codec) this.lastVerifiedCodec = codec;
     return { codec, verified: !!codec };
   }
 
