@@ -29,6 +29,12 @@ export interface H264CompatibilityRelayOptions {
   cameraId?: string;
   name?: string;
   getMuxedPort?: () => number | undefined;
+  /**
+   * "main" (default): full-size H.264 (width ≤1920, ~2.5 Mbit/s).
+   * "remote": small H.264 for HomeKit remote viewers (width ≤640,
+   * ~300 kbit/s). Remote HomeKit requests ask for 640x360 @ ~132 kbit/s.
+   */
+  variant?: "main" | "remote";
   streamServer?: { getMuxedPort(): number | undefined };
   ffmpegPath?: string;
   pool?: CompatibilityEncoderPool;
@@ -249,6 +255,7 @@ export class H264CompatibilityRelay extends EventEmitter {
     // the milliseconds from spawn to its first encoded byte.
     const spawnedAt = Date.now();
     let reportedFirstOutput = false;
+    const remote = this.options.variant === "remote";
     let child: Child;
     try {
       child = this.createChild(
@@ -281,9 +288,11 @@ export class H264CompatibilityRelay extends EventEmitter {
           // single-threaded ultrafast x264 cannot encode that in real time on
           // low-power hosts, and HomeKit then shows "No Response".
           "-vf",
-          "scale='min(1920,iw)':-2:flags=fast_bilinear",
+          remote
+            ? "scale='min(640,iw)':-2:flags=fast_bilinear"
+            : "scale='min(1920,iw)':-2:flags=fast_bilinear",
           "-threads:v",
-          "2",
+          remote ? "1" : "2",
           "-c:v",
           "libx264",
           "-preset",
@@ -302,11 +311,11 @@ export class H264CompatibilityRelay extends EventEmitter {
           // ran far above what an iPhone on Wi-Fi accepts; HomeKit reported
           // thousands of lost packets and timed out with "No Response".
           "-b:v",
-          "2500k",
+          remote ? "300k" : "2500k",
           "-maxrate",
-          "3000k",
+          remote ? "400k" : "3000k",
           "-bufsize",
-          "3000k",
+          remote ? "400k" : "3000k",
           "-c:a",
           "aac",
           // Fragment each output frame and flush the AVIO layer: fMP4 output

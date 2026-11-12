@@ -72,6 +72,8 @@ export interface StreamServiceOptions {
 }
 
 const METADATA_BOOTSTRAP_TIMEOUT_MS = 15_000;
+/** Stream id of the small H.264 stream offered for HomeKit remote viewing. */
+const REMOTE_STREAM_ID = "p2p-h264-remote";
 export const DEFAULT_COMPATIBILITY_STREAMING_CONFIG = {
   encoderCapacity: 1,
   criticalTemperatureC: 85,
@@ -209,6 +211,8 @@ function clock(ms: number): string {
 export class StreamService {
   private streamServerStarted = false;
   private relay?: CompatibilityRelay;
+  /** Small H.264 relay for HomeKit remote viewers, fed by the main relay. */
+  private remoteRelay?: H264CompatibilityRelay;
   private resolvedFfmpegPath?: string;
   private readonly bootstrapHandoffs = new Set<() => void>();
   private readonly compatibilityMode: () => CompatibilityMode;
@@ -294,6 +298,16 @@ export class StreamService {
         video: { codec: "h264", width, height },
         ...(audio && { audio }),
       },
+      {
+        // Small stream for HomeKit remote viewing (select it as the
+        // "Remote (Medium Resolution)" stream). Encoded from the main H.264
+        // relay output, so the camera still streams only once.
+        id: REMOTE_STREAM_ID,
+        name: "P2P Stream (H.264 Remote, small)",
+        container: "mp4",
+        video: { codec: "h264", width: 640, height: 360 },
+        ...(audio && { audio }),
+      },
     ];
   }
 
@@ -333,7 +347,11 @@ export class StreamService {
     try {
       const resolved = await this.resolveCurrentSource();
       bootstrap = resolved.bootstrap;
-      const selection = await this.select(resolved.codec, options);
+      const wantsRemote = options?.id === REMOTE_STREAM_ID;
+      const selection = await this.select(
+        resolved.codec,
+        wantsRemote ? { ...options, id: "p2p-h264" } : options,
+      );
 
       if (selection.kind === "error") {
         this.logger.warn(selection.message);
@@ -346,8 +364,11 @@ export class StreamService {
         handoff = this.handoffBootstrapOnConsumerAttach(bootstrap);
         const relay = await this.ensureCompatibilityRelay();
         relayStartedExclusively = relay.startedExclusively;
+        const port = wantsRemote
+          ? await this.ensureRemoteRelay(relay.port)
+          : relay.port;
         const media = await this.createCompatibilityMediaObject(
-          relay.port,
+          port,
           quality,
           options,
         );
@@ -720,7 +741,49 @@ export class StreamService {
     for (const release of [...this.bootstrapHandoffs]) release();
   }
 
+  /**
+   * Start (or reuse) the small remote relay. Its source is the main relay's
+   * loopback port, so it decodes 1920-wide H.264 instead of the camera's
+   * full-size H.265 and holds the main relay open while it runs.
+   */
+  private async ensureRemoteRelay(mainPort: number): Promise<number> {
+    if (!this.remoteRelay) {
+      const pool = this.encoderPool ?? getSharedCompatibilityEncoderPool();
+      this.remoteRelay = getSharedH264CompatibilityRelay({
+        // Distinct key: the shared-relay map and encoder pool are keyed by it.
+        serialNumber: `${this.serialNumber}:remote`,
+        name: `${this.serialNumber} (remote)`,
+        getMuxedPort: () => this.relay?.getPort() ?? mainPort,
+        ffmpegPath: await this.resolveFfmpegPath(),
+        pool,
+        variant: "remote",
+      });
+    }
+    try {
+      await this.remoteRelay.start();
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      this.logger.error(
+        `Cannot start remote H.264 relay for ${this.serialNumber}: ${detail}`,
+      );
+      throw error;
+    }
+    const port = this.remoteRelay.getPort();
+    if (!port) {
+      throw new Error(
+        `Remote H.264 relay started without a listening port for ${this.serialNumber}`,
+      );
+    }
+    this.logger.info(`📉 Remote (small) H.264 stream on port ${port}`);
+    return port;
+  }
+
   private async stopCompatibilityRelay(): Promise<void> {
+    if (this.remoteRelay) {
+      const remote = this.remoteRelay;
+      this.remoteRelay = undefined;
+      await remote.stop();
+    }
     if (!this.relay) return;
     const relay = this.relay;
     this.relay = undefined;

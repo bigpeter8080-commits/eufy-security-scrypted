@@ -282,7 +282,11 @@ export class StreamServer extends EventEmitter {
    * cache + P2P session for the next tap. Signal-dead cameras can't loop on
    * this — recycle suppression (no-signal / chronic-failure) stops them.
    */
-  private readonly COLD_START_STALE_THRESHOLD_MS = 18000;
+  // 12 s (was 18 s): the S4 normally delivers its first frame in 1–7 s; at
+  // 18 s plus a second wake the retry landed after HomeKit's ~40 s give-up.
+  // Still below the bridge's 15 s stream_data_wait, so the escalation below
+  // stops the stream explicitly before re-starting it.
+  private readonly COLD_START_STALE_THRESHOLD_MS = 12000;
 
   /**
    * Timestamp of when the current livestream "session" was established —
@@ -1255,10 +1259,50 @@ export class StreamServer extends EventEmitter {
     });
   }
 
+  /** In-flight ensureLivestreamState run, used to serialize callers. */
+  private ensureInFlight?: Promise<void>;
+  /** A caller arrived while a run was in flight; run once more after it. */
+  private ensureRerunRequested = false;
+
+  /**
+   * Serialized entry point. Two triggers (e.g. the muxer client attaching and
+   * the activity monitor) used to run the state machine concurrently; both
+   * saw "not streaming" and both sent startLivestream, the second failing
+   * with device_livestream_already_running and burning the no-data counter.
+   * Now a concurrent caller waits for the current run, then one re-run
+   * re-evaluates against the fresh state.
+   */
+  private async ensureLivestreamState(
+    skipSlotTransition: boolean = false,
+  ): Promise<void> {
+    // skipSlotTransition=true is only used from inside a slot transition;
+    // an in-flight run may itself be awaiting that transition, so joining
+    // it would deadlock. Run directly, as before.
+    if (skipSlotTransition) {
+      return this.ensureLivestreamStateOnce(true);
+    }
+    if (this.ensureInFlight) {
+      this.ensureRerunRequested = true;
+      return this.ensureInFlight;
+    }
+    const run = (async () => {
+      do {
+        this.ensureRerunRequested = false;
+        await this.ensureLivestreamStateOnce(false);
+      } while (this.ensureRerunRequested);
+    })();
+    this.ensureInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (this.ensureInFlight === run) this.ensureInFlight = undefined;
+    }
+  }
+
   /**
    * Ensure the livestream is in the correct state with retry logic
    */
-  private async ensureLivestreamState(
+  private async ensureLivestreamStateOnce(
     skipSlotTransition: boolean = false,
   ): Promise<void> {
     if (!skipSlotTransition && this.streamSlotTransition) {
@@ -1397,9 +1441,30 @@ export class StreamServer extends EventEmitter {
           this.startStopTimeout = setTimeout(() => {
             if (this.livestreamIntendedState && !this.livestreamActualState) {
               this.logger.warn(
-                `⚠️ No video data ${this.COLD_START_STALE_THRESHOLD_MS / 1000}s after startLivestream — escalating to wedge/recycle`,
+                `⚠️ No video data ${this.COLD_START_STALE_THRESHOLD_MS / 1000}s after startLivestream — stopping and re-starting`,
               );
-              this.ensureLivestreamState();
+              // The bridge may still hold the silent stream (its own
+              // no-data limit is 15 s); a bare re-start would only get
+              // "already running". Stop it first so the retry is real.
+              void (async () => {
+                try {
+                  await this.options.wsClient.commands
+                    .device(this.options.serialNumber)
+                    .stopLivestream();
+                } catch {
+                  // not running any more — fine
+                }
+                if (
+                  this.livestreamIntendedState &&
+                  !this.livestreamActualState
+                ) {
+                  await this.ensureLivestreamState().catch((e) =>
+                    this.logger.warn(
+                      `Re-start after silent start failed: ${e}`,
+                    ),
+                  );
+                }
+              })();
             }
           }, this.COLD_START_STALE_THRESHOLD_MS);
         } else if (this.livestreamIntendedState && actualStreamingStatus) {

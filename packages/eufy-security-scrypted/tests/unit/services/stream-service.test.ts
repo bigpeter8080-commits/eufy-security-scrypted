@@ -222,6 +222,12 @@ describe("StreamService", () => {
           container: "mp4",
           video: { codec: "h264", width: 1920, height: 1080 },
         },
+        {
+          id: "p2p-h264-remote",
+          name: "P2P Stream (H.264 Remote, small)",
+          container: "mp4",
+          video: { codec: "h264", width: 640, height: 360 },
+        },
       ]);
     });
     it("should return stream options with correct dimensions", () => {
