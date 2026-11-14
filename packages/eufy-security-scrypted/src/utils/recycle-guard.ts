@@ -44,8 +44,8 @@ export interface RecycleSuppressionResult {
  *   recycle won't help and only disrupts siblings. Suppress.
  * - Already failed `MAX_FAILED_RECYCLES` recycles without recovering → stop.
  *
- * Self-station (4G) cameras have no siblings to protect, so the no-signal
- * short-circuit doesn't apply to them (they may still hit the failure cap).
+ * Self-station cameras (4G, or standalone Wi-Fi) have no siblings to protect,
+ * so neither the no-signal short-circuit nor the failure cap applies to them.
  */
 export function recycleSuppression(
   input: RecycleSuppressionInput,
@@ -53,7 +53,15 @@ export function recycleSuppression(
   if (!input.isSelfStation && input.signalLevel === 0) {
     return { suppress: true, reason: "no-signal" };
   }
-  if (input.consecutiveFailedRecycles + 1 > MAX_FAILED_RECYCLES) {
+  // The failure cap exists to protect sibling cameras on a shared HomeBase.
+  // A self-station camera has none, and a failed recycle there usually just
+  // means the camera was rebooting — it must be retried once the camera is
+  // back, or the session stays dead until the bridge restarts. Its recycles
+  // are still rate-limited by the caller's minimum recycle interval.
+  if (
+    !input.isSelfStation &&
+    input.consecutiveFailedRecycles + 1 > MAX_FAILED_RECYCLES
+  ) {
     return { suppress: true, reason: "chronic-failure" };
   }
   return { suppress: false };

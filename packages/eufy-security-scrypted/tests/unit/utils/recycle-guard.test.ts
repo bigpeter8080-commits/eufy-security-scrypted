@@ -35,9 +35,21 @@ describe("recycleSuppression", () => {
   });
 
   it("does not no-signal-short-circuit a self-station (4G) camera", () => {
-    // 4G self-station has no siblings to protect; only the failure cap applies.
+    // A self-station has no siblings to protect.
     expect(
       recycleSuppression({ ...base, isSelfStation: true, signalLevel: 0 }),
+    ).toEqual({ suppress: false });
+  });
+
+  it("never applies the failure cap to a self-station camera", () => {
+    // No siblings to protect; a failed recycle usually means the camera was
+    // rebooting, so it must be retried (rate-limited by the caller).
+    expect(
+      recycleSuppression({
+        ...base,
+        isSelfStation: true,
+        consecutiveFailedRecycles: MAX_FAILED_RECYCLES + 3,
+      }),
     ).toEqual({ suppress: false });
   });
 

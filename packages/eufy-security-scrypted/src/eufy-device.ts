@@ -1233,6 +1233,16 @@ export class EufyDevice
       );
       return;
     }
+    // A suppression window that has run out earns one fresh recycle. Without
+    // this the failure count only clears when video flows, so a camera whose
+    // single recycle failed (e.g. it was mid-reboot) is re-suppressed forever.
+    if (this.recycleSuppressedUntil !== 0) {
+      this.logger.info(
+        `♻️  Recycle suppression for ${this.serialNumber} has expired — allowing a fresh recycle attempt`,
+      );
+      this.recycleSuppressedUntil = 0;
+      this.consecutiveFailedRecycles = 0;
+    }
 
     if (this.stationRecycleInFlight) {
       this.logger.info(
